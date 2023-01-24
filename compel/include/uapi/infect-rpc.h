@@ -5,7 +5,7 @@
 #include <sys/un.h>
 #include <stdint.h>
 
-#include <common/compiler.h>
+#include "common/compiler.h"
 
 struct parasite_ctl;
 extern int __must_check compel_rpc_sync(unsigned int cmd, struct parasite_ctl *ctl);
