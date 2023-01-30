@@ -572,17 +572,22 @@ static int restore_thread_ctx(int pid, struct thread_ctx *ctx, bool restore_ext_
 
 /* we run at @regs->ip */
 static int parasite_trap(struct parasite_ctl *ctl, pid_t pid, user_regs_struct_t *regs, struct thread_ctx *octx,
-			 bool may_use_extended_regs)
+			 bool may_use_extended_regs, pid_t *forked_pid)
 {
 	siginfo_t siginfo;
 	int status;
 	int ret = -1;
+
+	if (forked_pid) {
+		*forked_pid = 0;
+	}
 
 	/*
 	 * Most ideas are taken from Tejun Heo's parasite thread
 	 * https://code.google.com/p/ptrace-parasite/
 	 */
 
+try_again:
 	if (wait4(pid, &status, __WALL, NULL) != pid) {
 		pr_perror("Waited pid mismatch (pid: %d)", pid);
 		goto err;
@@ -603,6 +608,17 @@ static int parasite_trap(struct parasite_ctl *ctl, pid_t pid, user_regs_struct_t
 		goto err;
 	}
 
+	if (forked_pid && WSTOPSIG(status) == SIGTRAP && siginfo.si_code == (SIGTRAP | PTRACE_EVENT_FORK << 8)) {
+		ret = ptrace(PTRACE_GETEVENTMSG, pid, 0, forked_pid);
+		if (ret) {
+			pr_perror("Can't get event msg for victim child");
+			goto err;
+		}
+		pr_debug("Victim forked, pid %d\n", *forked_pid);
+		ptrace(PTRACE_CONT, pid);
+		goto try_again;
+	}
+
 	if (WSTOPSIG(status) != SIGTRAP || siginfo.si_code != ARCH_SI_TRAP) {
 		pr_debug("** delivering signal %d si_code=%d\n", siginfo.si_signo, siginfo.si_code);
 
@@ -619,6 +635,13 @@ err:
 	if (restore_thread_ctx(pid, octx, may_use_extended_regs))
 		ret = -1;
 
+	/*
+	 * Restore child thread context as well
+	 */
+	if (forked_pid && *forked_pid)
+		if (restore_thread_ctx(*forked_pid, octx, may_use_extended_regs))
+			ret = -1;
+
 	return ret;
 }
 
@@ -627,6 +650,7 @@ int compel_execute_syscall(struct parasite_ctl *ctl, user_regs_struct_t *regs, c
 	pid_t pid = ctl->rpid;
 	int err;
 	uint8_t code_orig[BUILTIN_SYSCALL_SIZE];
+	pid_t forked_pid;
 
 	/*
 	 * Inject syscall instruction and remember original code,
@@ -640,10 +664,15 @@ int compel_execute_syscall(struct parasite_ctl *ctl, user_regs_struct_t *regs, c
 
 	err = parasite_run(pid, PTRACE_CONT, ctl->ictx.syscall_ip, 0, regs, &ctl->orig);
 	if (!err)
-		err = parasite_trap(ctl, pid, regs, &ctl->orig, false);
+		err = parasite_trap(ctl, pid, regs, &ctl->orig, false, &forked_pid);
 
 	if (ptrace_poke_area(pid, (void *)code_orig, (void *)ctl->ictx.syscall_ip, sizeof(code_orig))) {
 		pr_err("Can't restore syscall blob (pid: %d)\n", ctl->rpid);
+		err = -1;
+	}
+
+	if (forked_pid && ptrace_poke_area(forked_pid, (void *)code_orig, (void *)ctl->ictx.syscall_ip, sizeof(code_orig))) {
+		pr_err("Can't restore syscall blob for forked process (pid: %d)\n", forked_pid);
 		err = -1;
 	}
 
@@ -657,7 +686,7 @@ int compel_run_at(struct parasite_ctl *ctl, unsigned long ip, user_regs_struct_t
 
 	ret = parasite_run(ctl->rpid, PTRACE_CONT, ip, 0, &regs, &ctl->orig);
 	if (!ret)
-		ret = parasite_trap(ctl, ctl->rpid, ret_regs ? ret_regs : &regs, &ctl->orig, false);
+		ret = parasite_trap(ctl, ctl->rpid, ret_regs ? ret_regs : &regs, &ctl->orig, false, NULL);
 	return ret;
 }
 
@@ -1423,7 +1452,7 @@ static int parasite_fini_seized(struct parasite_ctl *ctl)
 	if (ret < 0)
 		return ret;
 
-	if (compel_stop_on_syscall(1, __NR(rt_sigreturn, 0), __NR(rt_sigreturn, 1)))
+	if (compel_stop_on_syscall(pid, __NR(rt_sigreturn, 0), __NR(rt_sigreturn, 1)))
 		return -1;
 
 	/*
@@ -1535,7 +1564,7 @@ int compel_run_in_thread(struct parasite_thread_ctl *tctl, unsigned int cmd)
 
 	ret = parasite_run(pid, PTRACE_CONT, ctl->parasite_ip, stack, &regs, octx);
 	if (ret == 0)
-		ret = parasite_trap(ctl, pid, &regs, octx, true);
+		ret = parasite_trap(ctl, pid, &regs, octx, true, NULL);
 	if (ret == 0)
 		ret = (int)REG_RES(regs);
 
@@ -1560,7 +1589,7 @@ int compel_unmap(struct parasite_ctl *ctl, unsigned long addr)
 	if (ret)
 		goto err;
 
-	ret = compel_stop_on_syscall(1, __NR(munmap, 0), __NR(munmap, 1));
+	ret = compel_stop_on_syscall(pid, __NR(munmap, 0), __NR(munmap, 1));
 
 	/*
 	 * Don't touch extended registers here: they were restored
@@ -1640,17 +1669,16 @@ static inline int is_required_syscall(user_regs_struct_t *regs, pid_t pid, const
  * sys_nr - the required syscall number
  * sys_nr_compat - the required compatible syscall number
  */
-int compel_stop_on_syscall(int tasks, const int sys_nr, const int sys_nr_compat)
+int compel_stop_on_syscall(pid_t pid, const int sys_nr, const int sys_nr_compat)
 {
-	enum trace_flags trace = tasks > 1 ? TRACE_ALL : TRACE_ENTER;
+	enum trace_flags trace = TRACE_ENTER;
 	user_regs_struct_t regs;
 	int status, ret;
-	pid_t pid;
 
 	/* Stop all threads on the enter point in sys_rt_sigreturn */
-	while (tasks) {
-		pid = wait4(-1, &status, __WALL, NULL);
-		if (pid == -1) {
+	while (true) {
+		ret = wait4(pid, &status, __WALL, NULL);
+		if (ret == -1) {
 			pr_perror("wait4 failed");
 			return -1;
 		}
@@ -1707,8 +1735,7 @@ int compel_stop_on_syscall(int tasks, const int sys_nr, const int sys_nr_compat)
 				return -1;
 
 			pr_debug("%d was stopped\n", pid);
-			tasks--;
-			continue;
+			break;
 		}
 	goon:
 		ret = ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
