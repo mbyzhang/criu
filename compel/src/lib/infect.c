@@ -1130,8 +1130,14 @@ err:
 	return -1;
 }
 
+static int make_sock_for(int pid);
+
 int compel_infect(struct parasite_ctl *ctl, unsigned long nr_threads, unsigned long args_size)
 {
+	ctl->ictx.sock = make_sock_for(ctl->rpid);
+	if (ctl->ictx.sock < 0)
+		return -1;
+
 	if (compel_infect_no_daemon(ctl, nr_threads, args_size))
 		return -1;
 
@@ -1398,9 +1404,6 @@ struct parasite_ctl *compel_prepare(int pid)
 		goto err;
 
 	if (ictx->syscall_ip == (unsigned long)MAP_FAILED)
-		goto err;
-	ictx->sock = make_sock_for(pid);
-	if (ictx->sock < 0)
 		goto err;
 
 out:
