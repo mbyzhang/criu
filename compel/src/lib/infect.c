@@ -603,7 +603,7 @@ try_again:
 		goto err;
 	}
 
-	if (ptrace_get_regs(pid, regs)) {
+	if (regs && ptrace_get_regs(pid, regs)) {
 		pr_perror("Can't obtain registers (pid: %d)", pid);
 		goto err;
 	}
@@ -615,7 +615,21 @@ try_again:
 			goto err;
 		}
 		pr_debug("Victim forked, pid %d\n", *forked_pid);
-		ptrace(PTRACE_CONT, pid);
+		ret = ptrace(PTRACE_CONT, pid, NULL, NULL);
+		if (ret) {
+			pr_perror("Can't continue victim");
+			goto err;
+		}
+		goto try_again;
+	}
+
+	if (WSTOPSIG(status) == SIGTRAP && siginfo.si_code == (SIGTRAP | PTRACE_EVENT_STOP << 8)) {
+		pr_debug("Forked victim stopped\n");
+		ret = ptrace(PTRACE_CONT, pid, NULL, NULL);
+		if (ret) {
+			pr_perror("Can't continue forked victim");
+			goto err;
+		}
 		goto try_again;
 	}
 
@@ -633,15 +647,17 @@ try_again:
 	ret = 0;
 err:
 	if (restore_thread_ctx(pid, octx, may_use_extended_regs))
-		ret = -1;
+		return -1;
 
 	/*
 	 * Restore child thread context as well
 	 */
-	if (forked_pid && *forked_pid)
-		if (restore_thread_ctx(*forked_pid, octx, may_use_extended_regs))
-			ret = -1;
-
+	if (forked_pid && *forked_pid) {
+		ret = parasite_trap(ctl, *forked_pid, NULL, octx, may_use_extended_regs, NULL);
+		if (ret) {
+			pr_err("Can't trap child process\n");
+		}
+	}
 	return ret;
 }
 
