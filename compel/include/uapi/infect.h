@@ -182,4 +182,7 @@ void compel_set_thread_ip(struct parasite_thread_ctl *tctl, uint64_t v);
 
 extern void compel_get_stack(struct parasite_ctl *ctl, void **rstack, void **r_thread_stack);
 
+extern void* compel_get_remote_map(struct parasite_ctl *ctl);
+extern unsigned long compel_get_map_length(struct parasite_ctl *ctl);
+
 #endif

@@ -1839,3 +1839,13 @@ void compel_get_stack(struct parasite_ctl *ctl, void **rstack, void **r_thread_s
 	if (r_thread_stack)
 		*r_thread_stack = ctl->r_thread_stack;
 }
+
+void* compel_get_remote_map(struct parasite_ctl *ctl)
+{
+	return ctl->remote_map;
+}
+
+unsigned long compel_get_map_length(struct parasite_ctl *ctl)
+{
+	return ctl->map_length;
+}
