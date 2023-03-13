@@ -608,7 +608,10 @@ try_again:
 		goto err;
 	}
 
-	if (forked_pid && WSTOPSIG(status) == SIGTRAP && siginfo.si_code == (SIGTRAP | PTRACE_EVENT_FORK << 8)) {
+	if (forked_pid && WSTOPSIG(status) == SIGTRAP && (
+		siginfo.si_code == (SIGTRAP | PTRACE_EVENT_FORK << 8) ||
+		siginfo.si_code == (SIGTRAP | PTRACE_EVENT_CLONE << 8)
+	)) {
 		ret = ptrace(PTRACE_GETEVENTMSG, pid, 0, forked_pid);
 		if (ret) {
 			pr_perror("Can't get event msg for victim child");
